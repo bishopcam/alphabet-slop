@@ -1,0 +1,3 @@
+/home/bisho/Alphabet soup/build/_deps/raylib-subbuild/CMakeFiles/raylib-populate.dir
+/home/bisho/Alphabet soup/build/_deps/raylib-subbuild/CMakeFiles/edit_cache.dir
+/home/bisho/Alphabet soup/build/_deps/raylib-subbuild/CMakeFiles/rebuild_cache.dir
