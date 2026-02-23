@@ -46,6 +46,8 @@ struct WordPopup {
     float showAt;      // elapsed when popup first becomes visible (last letter landing)
     float popX, popY;  // origin position (above the word's text)
     bool  triggered;   // true once elapsed >= showAt (used to fire canBounce)
+    float impact = 1.0f;
+    Color flashColor = {255, 220, 80, 255};
 };
 
 struct Ripple {
@@ -86,6 +88,18 @@ struct RenderState {
     float canBounceTimer = 0.0f; // golden flash at bowl rim when word lands
     float chartProgress  = 0.0f; // 0→1: WPM chart animation on cashout screen
     float tachoWPM       = 0.0f; // smoothed WPM for tachometer needle
+    Color canBounceColor = {255, 220, 80, 255};
+    float canBounceStrength = 1.0f;
+
+    // Word-based combo and average-pressure system
+    int   comboStreakWords = 0;
+    int   bestComboStreakWords = 0;
+    float comboPulse = 0.0f;
+    float comboBreakFlash = 0.0f;
+    float avgPressure = 0.0f;      // 0..1, heats while above running average
+    float avgPressurePulse = 0.0f;
+    int   comboBonusCash = 0;
+    int   pressureBonusCash = 0;
 
     void init();
     void unload();

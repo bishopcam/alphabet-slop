@@ -16,6 +16,7 @@ static const int   TEXT_AREA_W = SCREEN_W - 120;
 static const float WORD_STAGGER = 0.030f;  // delay between letters within a word
 static const float FLIGHT_DUR   = 0.45f;   // flight time per letter
 static const float CASH_PAUSE   = 1.20f;   // cash popup display time before cashout
+static const float LINE_GROUP_STAGGER = 0.085f;
 
 static const Color BG_COLOR      = {30, 30, 40, 255};
 static const Color UNTYPED_COLOR = {180, 180, 190, 255};
@@ -26,6 +27,133 @@ static const Color GHOST_COLOR   = {130, 140, 220, 200};
 static const Color UI_COLOR      = {200, 200, 210, 255};
 static const Color ACCENT_COLOR  = {255, 220, 80, 255};
 static const Color DIM_COLOR     = {120, 120, 130, 255};
+
+static const int COMBO_TIER_COUNT = 7;
+static const int COMBO_THRESHOLDS[COMBO_TIER_COUNT] = {0, 2, 4, 7, 11, 16, 23};
+static const Color COMBO_COLORS[COMBO_TIER_COUNT] = {
+    {255, 84, 84, 255},   // red
+    {255, 144, 72, 255},  // orange
+    {255, 216, 76, 255},  // yellow
+    {90, 220, 110, 255},  // green
+    {72, 214, 220, 255},  // cyan
+    {92, 148, 255, 255},  // blue
+    {188, 112, 255, 255}, // violet
+};
+
+static float clamp01(float v) {
+    if (v < 0.0f) return 0.0f;
+    if (v > 1.0f) return 1.0f;
+    return v;
+}
+
+static Color mixColor(Color a, Color b, float t) {
+    t = clamp01(t);
+    return {
+        (unsigned char)((float)a.r + ((float)b.r - (float)a.r) * t),
+        (unsigned char)((float)a.g + ((float)b.g - (float)a.g) * t),
+        (unsigned char)((float)a.b + ((float)b.b - (float)a.b) * t),
+        (unsigned char)((float)a.a + ((float)b.a - (float)a.a) * t),
+    };
+}
+
+static int comboTierForStreak(int streak) {
+    int tier = 0;
+    for (int i = 1; i < COMBO_TIER_COUNT; i++) {
+        if (streak >= COMBO_THRESHOLDS[i]) tier = i;
+        else break;
+    }
+    return tier;
+}
+
+static float comboTierFill(int streak) {
+    int tier = comboTierForStreak(streak);
+    if (tier >= COMBO_TIER_COUNT - 1) return 1.0f;
+    float lo = (float)COMBO_THRESHOLDS[tier];
+    float hi = (float)COMBO_THRESHOLDS[tier + 1];
+    float t  = (streak - lo) / std::max(1.0f, hi - lo);
+    float segment = ((float)tier + clamp01(t)) / (float)(COMBO_TIER_COUNT - 1);
+    return clamp01(segment);
+}
+
+static Color comboColorForStreak(int streak) {
+    int tier = comboTierForStreak(streak);
+    if (tier >= COMBO_TIER_COUNT - 1) return COMBO_COLORS[COMBO_TIER_COUNT - 1];
+    float lo = (float)COMBO_THRESHOLDS[tier];
+    float hi = (float)COMBO_THRESHOLDS[tier + 1];
+    float t  = (streak - lo) / std::max(1.0f, hi - lo);
+    return mixColor(COMBO_COLORS[tier], COMBO_COLORS[tier + 1], t);
+}
+
+static void drawComboHud(Font font, float x, float y, float w,
+                         int comboStreakWords, int bestComboStreakWords,
+                         float comboPulse, float comboBreakFlash,
+                         float avgPressure, float avgPressurePulse,
+                         bool hasRunningAverage)
+{
+    float h = hasRunningAverage ? 120.0f : 84.0f;
+    DrawRectangleRounded({x, y, w, h}, 0.18f, 8, {16, 16, 26, 206});
+    DrawRectangleRoundedLinesEx({x, y, w, h}, 0.18f, 8, 1.2f, {68, 68, 94, 190});
+
+    Color comboColor = comboColorForStreak(comboStreakWords);
+    float comboFill  = comboTierFill(comboStreakWords);
+    float barX = x + 12.0f;
+    float barY = y + 33.0f;
+    float barW = w - 24.0f;
+    float barH = 16.0f;
+
+    DrawTextEx(font, "Rainbow Combo", {barX, y + 10.0f}, 15.0f, SPACING, {180, 180, 210, 210});
+
+    char comboBuf[64];
+    std::snprintf(comboBuf, sizeof(comboBuf), "x%d  best x%d", comboStreakWords, bestComboStreakWords);
+    Vector2 comboSz = MeasureTextEx(font, comboBuf, 14.0f, SPACING);
+    DrawTextEx(font, comboBuf, {x + w - comboSz.x - 12.0f, y + 10.0f}, 14.0f, SPACING, comboColor);
+
+    DrawRectangleRounded({barX, barY, barW, barH}, 0.45f, 8, {22, 22, 34, 255});
+    for (int i = 0; i < COMBO_TIER_COUNT - 1; i++) {
+        float sx = barX + (float)i / (float)(COMBO_TIER_COUNT - 1) * barW;
+        float sw = barW / (float)(COMBO_TIER_COUNT - 1);
+        Color seg = COMBO_COLORS[i];
+        seg.a = 95;
+        DrawRectangleGradientH((int)sx, (int)barY, (int)sw + 1, (int)barH, seg, COMBO_COLORS[i + 1]);
+    }
+    DrawRectangleRounded({barX, barY, barW * comboFill, barH}, 0.45f, 8, {comboColor.r, comboColor.g, comboColor.b, 220});
+    DrawRectangleRoundedLinesEx({barX, barY, barW, barH}, 0.45f, 8, 1.0f, {78, 78, 108, 220});
+
+    if (comboPulse > 0.0f) {
+        float a = comboPulse * comboPulse;
+        DrawRectangleRounded({barX - 1.0f, barY - 1.0f, barW * comboFill + 2.0f, barH + 2.0f},
+                             0.45f, 8, {comboColor.r, comboColor.g, comboColor.b, (unsigned char)(a * 170.0f)});
+    }
+    if (comboBreakFlash > 0.0f) {
+        DrawRectangleRounded({barX - 1.0f, barY - 1.0f, barW + 2.0f, barH + 2.0f},
+                             0.45f, 8, {255, 90, 90, (unsigned char)(comboBreakFlash * 120.0f)});
+    }
+
+    if (!hasRunningAverage) return;
+
+    float pX = barX;
+    float pY = y + 72.0f;
+    float pW = barW;
+    float pH = 14.0f;
+
+    DrawTextEx(font, "Avg Pressure", {pX, pY - 18.0f}, 14.0f, SPACING, {160, 170, 200, 210});
+    Color cool = {70, 130, 255, 205};
+    Color hot  = {255, 110, 60, 230};
+    Color pCol = mixColor(cool, hot, avgPressure);
+    DrawRectangleRounded({pX, pY, pW, pH}, 0.45f, 8, {22, 22, 34, 255});
+    DrawRectangleRounded({pX, pY, pW * clamp01(avgPressure), pH}, 0.45f, 8, pCol);
+    DrawRectangleRoundedLinesEx({pX, pY, pW, pH}, 0.45f, 8, 1.0f, {72, 78, 110, 220});
+
+    if (avgPressurePulse > 0.0f) {
+        DrawRectangleRounded({pX - 2.0f, pY - 2.0f, pW + 4.0f, pH + 4.0f},
+                             0.45f, 8, {pCol.r, pCol.g, pCol.b, (unsigned char)(avgPressurePulse * 120.0f)});
+    }
+
+    const char* mood = (avgPressure >= 0.92f) ? "HOT" :
+                       (avgPressure >= 0.65f) ? "PUSHING" : "WARMUP";
+    Vector2 moodSz = MeasureTextEx(font, mood, 13.0f, SPACING);
+    DrawTextEx(font, mood, {x + w - moodSz.x - 12.0f, pY - 18.0f}, 13.0f, SPACING, pCol);
+}
 
 static void drawCentered(Font font, const char* text, float y, float size, Color color) {
     Vector2 sz = MeasureTextEx(font, text, size, SPACING);
@@ -503,11 +631,21 @@ void RenderState::resetTypingCan(bool newParagraph) {
     canFinishTimer = -1.0f;
     readyToCashout = false;
     canBounceTimer = 0.0f;
+    canBounceColor = {255, 220, 80, 255};
+    canBounceStrength = 1.0f;
     chartProgress  = 0.0f;
     totalWordCash  = 0;
     if (newParagraph) {
         wordCashHistory.clear();
         tachoWPM = 0.0f;
+        comboStreakWords = 0;
+        bestComboStreakWords = 0;
+        comboPulse = 0.0f;
+        comboBreakFlash = 0.0f;
+        avgPressure = 0.0f;
+        avgPressurePulse = 0.0f;
+        comboBonusCash = 0;
+        pressureBonusCash = 0;
     }
 }
 
@@ -526,12 +664,29 @@ void RenderState::drawTyping(GameState& game, float dt) {
     float rawWPM = ts.getWPM();
     tachoWPM += (rawWPM - tachoWPM) * std::min(1.0f, dt * 2.5f);
 
+    bool hasRunningAverage = game.runningAvgWPM > 0.0f;
+    float speedRatio = hasRunningAverage ? rawWPM / std::max(1.0f, game.runningAvgWPM) : 1.0f;
+    if (hasRunningAverage && ts.elapsedTime > 0.15f) {
+        float prevPressure = avgPressure;
+        if (speedRatio >= 1.0f)
+            avgPressure += dt * (0.22f + (speedRatio - 1.0f) * 0.85f);
+        else
+            avgPressure -= dt * (0.35f + (1.0f - speedRatio) * 0.90f);
+        avgPressure = clamp01(avgPressure);
+        if (prevPressure < 0.95f && avgPressure >= 0.95f) avgPressurePulse = 1.0f;
+    } else {
+        avgPressure = std::max(0.0f, avgPressure - dt * 0.25f);
+    }
+    if (comboPulse > 0.0f) comboPulse = std::max(0.0f, comboPulse - dt * 2.6f);
+    if (comboBreakFlash > 0.0f) comboBreakFlash = std::max(0.0f, comboBreakFlash - dt * 2.2f);
+    if (avgPressurePulse > 0.0f) avgPressurePulse = std::max(0.0f, avgPressurePulse - dt * 2.8f);
+
     // UI bar (no WPM text — tachometer is the focal WPM display)
     char buf[128];
     std::snprintf(buf, sizeof(buf), "Accuracy: %.1f%%", ts.getAccuracy());
     DrawTextEx(font, buf, {(float)(TEXT_AREA_X) + shakeX, 20.0f + shakeY}, 22.0f, SPACING, UI_COLOR);
 
-    if (game.runningAvgWPM > 0.0f) {
+    if (hasRunningAverage) {
         std::snprintf(buf, sizeof(buf), "Avg: %.0f WPM", game.runningAvgWPM);
         DrawTextEx(font, buf, {(float)(TEXT_AREA_X + 500) + shakeX, 20.0f + shakeY}, 22.0f, SPACING, GHOST_COLOR);
     }
@@ -544,7 +699,7 @@ void RenderState::drawTyping(GameState& game, float dt) {
 
     // Ghost cursor: fractional character position at average WPM
     float ghostCharPos = -1.0f;
-    if (game.runningAvgWPM > 0.0f && ts.elapsedTime > 0.0f) {
+    if (hasRunningAverage && ts.elapsedTime > 0.0f) {
         ghostCharPos = ts.elapsedTime * game.runningAvgWPM * 5.0f / 60.0f;
         if (ghostCharPos > (float)n - 0.001f) ghostCharPos = (float)n - 0.001f;
     }
@@ -555,10 +710,29 @@ void RenderState::drawTyping(GameState& game, float dt) {
     float textEndX, textEndY;
     computeCharLayout(ts, font, charWidth, charPos, textEndX, textEndY);
 
+    // Per-character line index from wrapped layout
+    std::vector<int> charLine(n, 0);
+    int maxLine = 0;
+    if (n > 0) {
+        int line = 0;
+        float prevY = charPos[0].y;
+        for (int i = 0; i < n; i++) {
+            if (i > 0 && std::fabs(charPos[i].y - prevY) > 1.0f) line++;
+            charLine[i] = line;
+            prevY = charPos[i].y;
+        }
+        maxLine = line;
+    }
+
+    int cursorLine = 0;
+    if (n > 0) {
+        if (ts.cursor < n) cursorLine = charLine[std::max(0, ts.cursor)];
+        else cursorLine = maxLine;
+    }
+    int flushBeforeLine = ts.finished ? (maxLine + 1) : cursorLine;
+
     // --- Can animation constants ---
     const float CAN_CX   = 500.0f;
-    const float CAN_HALF = 50.0f;
-    const float CAN_H    = 105.0f;
     const float CAN_TOP  = 552.0f;
 
     // --- Update flying letters ---
@@ -570,7 +744,10 @@ void RenderState::drawTyping(GameState& game, float dt) {
             [](const FlyingLetter& fl){ return fl.elapsed >= fl.launchDelay + FLIGHT_DUR; }),
         flyingLetters.end());
 
-    // 3. Launch completed words
+    // 3. Launch completed words in line groups:
+    // words stay in text until you advance to the next wrapped line.
+    int activeLaunchLine = -1;
+    int lineWordIdx = 0;
     while (sentCharIdx < n) {
         // Skip spaces silently (they don't fly)
         if (ts.chars[sentCharIdx].ch == ' ') { sentCharIdx++; continue; }
@@ -583,6 +760,16 @@ void RenderState::drawTyping(GameState& game, float dt) {
         // Word is done when cursor has passed the trailing space (or end of text)
         int triggerAt = (wordEnd < n) ? wordEnd + 1 : wordEnd;
         if (ts.cursor < triggerAt && !ts.finished) break;
+
+        int wordLine = charLine[wordStart];
+        if (wordLine >= flushBeforeLine) break;
+
+        if (wordLine != activeLaunchLine) {
+            activeLaunchLine = wordLine;
+            lineWordIdx = 0;
+        }
+        float lineDelay = (float)lineWordIdx * LINE_GROUP_STAGGER;
+        lineWordIdx++;
 
         // Compute per-word rating before launching letters
         bool wordClean = true;
@@ -602,6 +789,41 @@ void RenderState::drawTyping(GameState& game, float dt) {
             rating = 1; // OKAY: has errors but roughly on pace
         }
 
+        // Word-combo streak: increments on clean words, resets on imperfect words.
+        if (wordClean) {
+            comboStreakWords++;
+            if (comboStreakWords > bestComboStreakWords)
+                bestComboStreakWords = comboStreakWords;
+            comboPulse = 1.0f;
+        } else {
+            if (comboStreakWords > 0) comboBreakFlash = 1.0f;
+            comboStreakWords = 0;
+        }
+
+        int comboTier = comboTierForStreak(comboStreakWords);
+        Color comboCol = comboColorForStreak(comboStreakWords);
+
+        int comboBonus = 0;
+        if (rating > 0 && wordClean) {
+            if (comboTier >= 2) comboBonus += 1;
+            if (comboTier >= 4) comboBonus += 1;
+        }
+
+        int pressureBonus = 0;
+        if (rating > 0 && hasRunningAverage) {
+            if (avgPressure >= 0.70f) pressureBonus += 1;
+            if (avgPressure >= 0.93f) pressureBonus += 1;
+        }
+
+        int wordCash = 0;
+        if (rating > 0) {
+            wordCash = std::min(7, rating + comboBonus + pressureBonus);
+            wordCashHistory.push_back({ts.elapsedTime, wordCash});
+            totalWordCash += wordCash;
+            comboBonusCash += comboBonus;
+            pressureBonusCash += pressureBonus;
+        }
+
         // Rating color for flying letters
         Color ratingCol;
         if      (rating == 3) ratingCol = {255, 210,  60, 220}; // PERFECT: gold
@@ -609,14 +831,13 @@ void RenderState::drawTyping(GameState& game, float dt) {
         else if (rating == 1) ratingCol = {130, 140, 220, 220}; // OKAY:    blue-gray
         else                  ratingCol = {180, 180, 190, 220}; // unrated: dim
 
-        // Per-word cash and bowl-bounce trigger
-        if (rating > 0) {
-            // Cash: $1/$2/$3 matching OKAY/GREAT/PERFECT
-            int wordCash = rating;
-            wordCashHistory.push_back({ts.elapsedTime, wordCash});
-            totalWordCash += wordCash;
+        if (wordClean && comboStreakWords >= 2) {
+            ratingCol = comboCol;
+            ratingCol.a = 230;
+        }
 
-            // WordPopup drives the bowl bounce glow only (no text label)
+        // Per-word bowl impact trigger
+        if (rating > 0) {
             float wx = 0.0f;
             for (int k = wordStart; k < wordEnd; k++)
                 wx += charPos[k].x + charWidth[k] * 0.5f;
@@ -625,11 +846,16 @@ void RenderState::drawTyping(GameState& game, float dt) {
             WordPopup wp;
             wp.rating    = rating;
             wp.elapsed   = 0.0f;
-            wp.showAt    = (float)(wordEnd - wordStart - 1) * WORD_STAGGER
+            wp.showAt    = lineDelay + (float)(wordEnd - wordStart - 1) * WORD_STAGGER
                            + FLIGHT_DUR * 0.75f;
             wp.popX      = wx;
             wp.popY      = charPos[wordStart].y;
             wp.triggered = false;
+            wp.impact    = 1.0f + 0.08f * (float)wordCash + 0.10f * (float)comboTier;
+            wp.flashColor = ratingCol;
+            if (pressureBonus > 0)
+                wp.flashColor = mixColor(wp.flashColor, {255, 122, 58, 235},
+                                         pressureBonus == 2 ? 0.55f : 0.35f);
             wordPopups.push_back(wp);
         }
 
@@ -639,10 +865,10 @@ void RenderState::drawTyping(GameState& game, float dt) {
             fl.ch          = ts.chars[k].ch;
             fl.startX      = charPos[k].x + charWidth[k] * 0.5f;
             fl.startY      = charPos[k].y + FONT_SIZE * 0.5f;
-            fl.launchDelay = (float)(k - wordStart) * WORD_STAGGER;
+            fl.launchDelay = lineDelay + (float)(k - wordStart) * WORD_STAGGER;
             fl.elapsed     = 0.0f;
             float vd       = std::max(10.0f, CAN_TOP - fl.startY);
-            fl.arcH        = 45.0f + vd * 0.28f + (float)((k * 17 + 13) % 50);
+            fl.arcH        = 45.0f + vd * 0.28f + (float)((k * 17 + 13) % 50) + lineDelay * 95.0f;
             fl.spinDir     = (k % 2 == 0) ? 1.0f : -1.0f;
             fl.col         = ratingCol;
             flyingLetters.push_back(fl);
@@ -658,16 +884,22 @@ void RenderState::drawTyping(GameState& game, float dt) {
         if (canFinishTimer >= CASH_PAUSE) readyToCashout = true;
     }
 
-    // 5. Update word popups and can bounce timer
+    // 5. Update word popups and bowl bounce timer
     if (canBounceTimer > 0.0f) {
         canBounceTimer -= dt;
-        if (canBounceTimer < 0.0f) canBounceTimer = 0.0f;
+        if (canBounceTimer < 0.0f) {
+            canBounceTimer = 0.0f;
+            canBounceColor = {255, 220, 80, 255};
+            canBounceStrength = 1.0f;
+        }
     }
     for (auto& wp : wordPopups) {
         wp.elapsed += dt;
         if (!wp.triggered && wp.elapsed >= wp.showAt) {
             wp.triggered    = true;
-            canBounceTimer  = 0.40f; // trigger golden flash at can mouth
+            canBounceTimer  = 0.42f;
+            canBounceStrength = std::max(canBounceStrength, wp.impact);
+            canBounceColor = wp.flashColor;
         }
     }
     // Remove expired popups
@@ -774,17 +1006,41 @@ void RenderState::drawTyping(GameState& game, float dt) {
     // --- Tachometer (focal point between text and bowl) ---
     drawTachometer(font, 155.0f, 510.0f, 92.0f, 62.0f, tachoWPM, game.runningAvgWPM);
 
+    // Combo/pace HUD near tachometer
+    drawComboHud(font, 248.0f, 466.0f, 250.0f,
+                 comboStreakWords, bestComboStreakWords,
+                 comboPulse, comboBreakFlash,
+                 avgPressure, avgPressurePulse,
+                 hasRunningAverage);
+
+    if (comboPulse > 0.02f && comboStreakWords >= 2) {
+        Color cc = comboColorForStreak(comboStreakWords);
+        char comboPop[48];
+        std::snprintf(comboPop, sizeof(comboPop), "combo x%d", comboStreakWords);
+        float sz = 20.0f + comboPulse * 5.5f;
+        Vector2 psz = MeasureTextEx(font, comboPop, sz, SPACING);
+        DrawTextEx(font, comboPop,
+                   {CAN_CX - psz.x * 0.5f, CAN_TOP - 64.0f - comboPulse * 8.0f},
+                   sz, SPACING, {cc.r, cc.g, cc.b, (unsigned char)(120 + comboPulse * 110.0f)});
+    }
+
     // --- Soup bowl (drawn on top so letters vanish into the soup) ---
     drawBowl(CAN_CX, CAN_TOP, 110.0f, 105.0f);
 
     // --- Bowl rim bounce glow when a word lands ---
     if (canBounceTimer > 0.0f) {
-        float bt     = canBounceTimer / 0.40f;       // 1=fresh → 0=gone
-        float expand = (1.0f - bt) * 18.0f;
-        unsigned char ba = (unsigned char)(bt * bt * 180);
+        float bt     = canBounceTimer / 0.42f;
+        float strength = std::max(1.0f, canBounceStrength);
+        float expand = (1.0f - bt) * (16.0f + 9.0f * strength);
+        unsigned char ba = (unsigned char)(bt * bt * std::min(250.0f, 160.0f + 24.0f * strength));
+        Color glow = canBounceColor;
+        glow.a = ba;
         DrawEllipse((int)CAN_CX, (int)CAN_TOP,
-                    (int)(110.0f * 0.90f + expand), (int)(13 + expand * 0.3f),
-                    {255, 220, 80, ba});
+                    (int)(110.0f * 0.90f + expand), (int)(13 + expand * 0.3f), glow);
+        Color inner = glow;
+        inner.a = (unsigned char)(ba * 0.55f);
+        DrawEllipse((int)CAN_CX, (int)CAN_TOP,
+                    (int)(110.0f * 0.78f + expand * 0.72f), (int)(9 + expand * 0.22f), inner);
     }
 }
 
@@ -1048,8 +1304,8 @@ void RenderState::drawCashout(const GameState& game, float dt) {
     float rx = PX + 12, ry2 = PY + 10;
 
     // Per-section reveal thresholds — each stamps in independently
-    const float T0=0.00f, T1=0.12f, T2=0.22f, T3=0.32f, T4=0.42f,
-                T5=0.52f, T6=0.60f, T7=0.67f, T8=0.76f, T9=0.86f;
+    const float T0=0.00f, T1=0.12f, T2=0.22f, T3=0.32f, T4=0.41f,
+                T5=0.50f, T6=0.58f, T7=0.66f, T8=0.74f, T9=0.82f, T10=0.90f;
 
     // Section 0: title + serving size
     if (chartProgress >= T0) {
@@ -1101,27 +1357,30 @@ void RenderState::drawCashout(const GameState& game, float dt) {
     std::snprintf(buf, sizeof(buf), "%d chars", game.typing.maxStreak);
     statRow("Best Streak", buf, false, T4);
 
+    std::snprintf(buf, sizeof(buf), "%d words", bestComboStreakWords);
+    statRow("Best Word Combo", buf, false, T5);
+
     int errors = game.typing.totalKeystrokes - game.typing.correctKeystrokes;
     std::snprintf(buf, sizeof(buf), "%d", errors);
-    statRow("Errors", buf, false, T5);
+    statRow("Errors", buf, false, T6);
 
     std::snprintf(buf, sizeof(buf), "%.1f sec", game.typing.elapsedTime);
-    statRow("Time Taken", buf, false, T6);
+    statRow("Time Taken", buf, false, T7);
 
     // Thin rule + running average stamp together
-    if (chartProgress >= T7) {
-        inkFlash(T7, ry2, 7.0f);
+    if (chartProgress >= T8) {
+        inkFlash(T8, ry2, 7.0f);
         DrawRectangle((int)PX, (int)ry2, (int)PW, 3, INK);
     }
     ry2 += 7;
     if (game.runningAvgWPM > 0.0f) {
         std::snprintf(buf, sizeof(buf), "%.0f WPM", game.runningAvgWPM);
-        statRow("Running Average", buf, false, T7);
+        statRow("Running Average", buf, false, T8);
     }
 
     if (game.beatAverage) {
-        if (chartProgress >= T8) {
-            inkFlash(T8, ry2, 28.0f);
+        if (chartProgress >= T9) {
+            inkFlash(T9, ry2, 28.0f);
             DrawRectangle((int)PX, (int)ry2, (int)PW, 1, {140, 135, 125, 200});
             DrawTextEx(font, "  Beat your average!", {rx + 10, ry2 + 4}, 14.0f, SPACING, {55, 140, 55, 255});
         }
@@ -1129,8 +1388,8 @@ void RenderState::drawCashout(const GameState& game, float dt) {
     }
 
     // Section 9: thick rule + total cash
-    if (chartProgress >= T9) {
-        inkFlash(T9, ry2, 40.0f);
+    if (chartProgress >= T10) {
+        inkFlash(T10, ry2, 40.0f);
         DrawRectangle((int)PX, (int)ry2, (int)PW, 6, INK);
         DrawTextEx(font, "Total Cash", {rx, ry2 + 9}, 20.0f, SPACING, INK);
         std::snprintf(buf, sizeof(buf), "$%d", displayTotal);
@@ -1218,6 +1477,18 @@ void RenderState::drawCashout(const GameState& game, float dt) {
         Vector2 eSz  = MeasureTextEx(font, buf, earnSz, SPACING);
         DrawTextEx(font, buf, {RX + (RW - eSz.x)*0.5f, cashLabelY + 20},
                    earnSz, SPACING, earnCol);
+
+        float bonusY = cashLabelY + 82.0f;
+        std::snprintf(buf, sizeof(buf), "+$%d combo bonus", comboBonusCash);
+        Color comboCol = comboColorForStreak(bestComboStreakWords);
+        comboCol.a = 215;
+        Vector2 cbSz = MeasureTextEx(font, buf, 14.0f, SPACING);
+        DrawTextEx(font, buf, {RX + (RW - cbSz.x)*0.5f, bonusY}, 14.0f, SPACING, comboCol);
+
+        std::snprintf(buf, sizeof(buf), "+$%d pace bonus", pressureBonusCash);
+        Color paceCol = mixColor({90, 145, 255, 210}, {255, 122, 58, 225}, avgPressure);
+        Vector2 pbSz = MeasureTextEx(font, buf, 14.0f, SPACING);
+        DrawTextEx(font, buf, {RX + (RW - pbSz.x)*0.5f, bonusY + 24.0f}, 14.0f, SPACING, paceCol);
 
         // Paragraph counter at bottom of panel
         std::snprintf(buf, sizeof(buf), "Paragraph %d complete", game.paragraphsCompleted);
