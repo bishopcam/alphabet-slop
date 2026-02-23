@@ -88,6 +88,8 @@ struct RenderState {
     float canBounceTimer = 0.0f; // golden flash at bowl rim when word lands
     float chartProgress  = 0.0f; // 0→1: WPM chart animation on cashout screen
     float tachoWPM       = 0.0f; // smoothed WPM for tachometer needle
+    std::vector<float> liveWpmHistory;
+    float liveWpmSampleTimer = 0.0f;
     Color canBounceColor = {255, 220, 80, 255};
     float canBounceStrength = 1.0f;
 

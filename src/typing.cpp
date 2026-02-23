@@ -13,6 +13,8 @@ void TypingState::load(const std::string& paragraph) {
     wpmSamples.clear();
     wpmSampleTimer  = 0.0f;
     wpmFinalPushed  = false;
+    recentKeyTimes.clear();
+    liveWPM = 0.0f;
 
     for (char c : paragraph) {
         CharInfo ci;
@@ -25,6 +27,8 @@ void TypingState::processKey(int key) {
     if (finished || cursor >= (int)chars.size()) return;
 
     totalKeystrokes++;
+    float now = elapsedTime;
+    recentKeyTimes.push_back(now);
 
     char expected = chars[cursor].ch;
     if ((char)key == expected) {
@@ -57,6 +61,20 @@ void TypingState::update(float dt) {
         }
     }
 
+    // Live pace WPM: computed from the last ~2.2 seconds of key timings.
+    float now = elapsedTime;
+    while (!recentKeyTimes.empty() && now - recentKeyTimes.front() > 2.2f) {
+        recentKeyTimes.erase(recentKeyTimes.begin());
+    }
+    if (recentKeyTimes.size() >= 2) {
+        float span = std::max(0.08f, recentKeyTimes.back() - recentKeyTimes.front());
+        float chars = (float)(recentKeyTimes.size() - 1);
+        float rawLive = (chars / 5.0f) / (span / 60.0f);
+        liveWPM += (rawLive - liveWPM) * std::min(1.0f, dt * 12.0f);
+    } else if (!finished) {
+        liveWPM = std::max(0.0f, liveWPM - dt * 42.0f);
+    }
+
     // Push one final sample when the paragraph is completed
     if (finished && !wpmFinalPushed) {
         wpmSamples.push_back(getWPM());
@@ -76,6 +94,10 @@ float TypingState::getWPM() const {
     float minutes = elapsedTime / 60.0f;
     float words = (float)correctKeystrokes / 5.0f;
     return words / minutes;
+}
+
+float TypingState::getLiveWPM() const {
+    return liveWPM;
 }
 
 float TypingState::getAccuracy() const {

@@ -30,11 +30,14 @@ struct TypingState {
     std::vector<float> wpmSamples;
     float wpmSampleTimer   = 0.0f;
     bool  wpmFinalPushed   = false;
+    std::vector<float> recentKeyTimes; // elapsedTime stamps for recent key presses
+    float liveWPM = 0.0f;              // short-window pace WPM (more instant)
 
     void load(const std::string& paragraph);
     void processKey(int key);
     void update(float dt);
 
     float getWPM() const;
+    float getLiveWPM() const;
     float getAccuracy() const;
 };

@@ -621,8 +621,9 @@ void RenderState::drawMenu() {
 }
 
 static void drawBowl(float cx, float topY, float halfTopW, float bowlH); // defined below
-static void drawTachometer(Font font, float cx, float cy, float outerR, float innerR,
-                            float tachoWPM, float avgWPM);              // defined below
+static void drawTachometer(Font font, float x, float y, float w, float h,
+                            float tachoWPM, float avgWPM,
+                            const std::vector<float>& history);         // defined below
 
 void RenderState::resetTypingCan(bool newParagraph) {
     flyingLetters.clear();
@@ -638,6 +639,8 @@ void RenderState::resetTypingCan(bool newParagraph) {
     if (newParagraph) {
         wordCashHistory.clear();
         tachoWPM = 0.0f;
+        liveWpmHistory.clear();
+        liveWpmSampleTimer = 0.0f;
         comboStreakWords = 0;
         bestComboStreakWords = 0;
         comboPulse = 0.0f;
@@ -660,12 +663,21 @@ void RenderState::drawTyping(GameState& game, float dt) {
 
     ClearBackground(BG_COLOR);
 
-    // Smooth tachometer WPM
-    float rawWPM = ts.getWPM();
-    tachoWPM += (rawWPM - tachoWPM) * std::min(1.0f, dt * 2.5f);
+    // Smooth live WPM (driven by short-window key timing)
+    float rawWPM = ts.getLiveWPM();
+    tachoWPM += (rawWPM - tachoWPM) * std::min(1.0f, dt * 6.0f);
+    liveWpmSampleTimer += dt;
+    while (liveWpmSampleTimer >= 0.05f) {
+        liveWpmHistory.push_back(tachoWPM);
+        liveWpmSampleTimer -= 0.05f;
+        if (liveWpmHistory.size() > 140)
+            liveWpmHistory.erase(liveWpmHistory.begin(), liveWpmHistory.begin() + (liveWpmHistory.size() - 140));
+    }
+    if (liveWpmHistory.empty()) liveWpmHistory.push_back(tachoWPM);
 
     bool hasRunningAverage = game.runningAvgWPM > 0.0f;
-    float speedRatio = hasRunningAverage ? rawWPM / std::max(1.0f, game.runningAvgWPM) : 1.0f;
+    float paceWPM = ts.getLiveWPM() * 0.60f + ts.getWPM() * 0.40f;
+    float speedRatio = hasRunningAverage ? paceWPM / std::max(1.0f, game.runningAvgWPM) : 1.0f;
     if (hasRunningAverage && ts.elapsedTime > 0.15f) {
         float prevPressure = avgPressure;
         if (speedRatio >= 1.0f)
@@ -776,7 +788,7 @@ void RenderState::drawTyping(GameState& game, float dt) {
         for (int k = wordStart; k < wordEnd; k++)
             if (ts.chars[k].hadError) { wordClean = false; break; }
 
-        float currentWPM = ts.getWPM();
+        float currentWPM = ts.getLiveWPM() * 0.55f + ts.getWPM() * 0.45f;
         float ratio = (game.runningAvgWPM > 0.0f)
                       ? currentWPM / game.runningAvgWPM : 1.2f;
 
@@ -1003,11 +1015,11 @@ void RenderState::drawTyping(GameState& game, float dt) {
         DrawTextPro(font, str, {bx, by}, origin, spin, FONT_SIZE, SPACING, col);
     }
 
-    // --- Tachometer (focal point between text and bowl) ---
-    drawTachometer(font, 155.0f, 510.0f, 92.0f, 62.0f, tachoWPM, game.runningAvgWPM);
+    // --- Live WPM chart (focal point between text and bowl) ---
+    drawTachometer(font, 34.0f, 338.0f, 352.0f, 248.0f, tachoWPM, game.runningAvgWPM, liveWpmHistory);
 
-    // Combo/pace HUD near tachometer
-    drawComboHud(font, 248.0f, 466.0f, 250.0f,
+    // Combo/pace HUD on right lane below text (away from bowl)
+    drawComboHud(font, 650.0f, 430.0f, 306.0f,
                  comboStreakWords, bestComboStreakWords,
                  comboPulse, comboBreakFlash,
                  avgPressure, avgPressurePulse,
@@ -1089,158 +1101,107 @@ static void drawBowl(float cx, float topY, float halfTopW, float bowlH) {
                      {145, 132, 112, 190});
 }
 
-// Standard RPM-style WPM tachometer.
-// Arc: 7-o'clock (120°) → 5-o'clock (420°=60°), sweep 300°.
-// Needle catches fire above average WPM and cools as speed drops.
-static void drawTachometer(Font font, float cx, float cy,
-                            float outerR, float innerR,
-                            float tachoWPM, float avgWPM)
+// Live WPM chart with avg line and flame surge at the leading point.
+static void drawTachometer(Font font, float x, float y, float w, float h,
+                            float tachoWPM, float avgWPM,
+                            const std::vector<float>& history)
 {
-    float time        = (float)GetTime();
-    const float MAX_WPM   = std::max(80.0f, avgWPM > 0.0f ? avgWPM * 1.75f : 100.0f);
-    const float ARC_START = 120.0f;
-    const float ARC_SWEEP = 300.0f;
-    const int   SEGS      = 72;
-    const float avgRatio  = (avgWPM > 0.0f) ? std::min(avgWPM / MAX_WPM, 1.0f) : 0.55f;
+    float time = (float)GetTime();
+    Rectangle panel = {x, y, w, h};
+    DrawRectangleRounded(panel, 0.14f, 8, {16, 16, 26, 235});
+    DrawRectangleRoundedLinesEx(panel, 0.14f, 8, 1.3f, {74, 74, 100, 195});
 
-    // Background track
-    DrawRing({cx, cy}, innerR - 5, outerR + 5, ARC_START, ARC_START + ARC_SWEEP,
-             SEGS, {16, 16, 26, 245});
+    float px = x + 12.0f;
+    float py = y + 26.0f;
+    float pw = w - 24.0f;
+    float ph = h - 54.0f;
+    DrawRectangleRounded({px, py, pw, ph}, 0.08f, 8, {10, 10, 18, 245});
+    DrawRectangleRoundedLinesEx({px, py, pw, ph}, 0.08f, 8, 1.0f, {48, 48, 72, 210});
 
-    // Major tick marks (6 divisions)
-    for (int i = 0; i <= 5; i++) {
-        float t         = (float)i / 5.0f;
-        float tickAngle = (ARC_START + t * ARC_SWEEP) * DEG2RAD;
-        float ti = innerR - 8, to = outerR + 9;
-        DrawLineEx({cx + ti * std::cos(tickAngle), cy + ti * std::sin(tickAngle)},
-                   {cx + to * std::cos(tickAngle), cy + to * std::sin(tickAngle)},
-                   2.5f, {205, 200, 188, 195});
+    float maxW = std::max(90.0f, avgWPM > 0.0f ? avgWPM * 1.55f : 120.0f);
+    for (float v : history) if (v > maxW) maxW = v;
+    maxW *= 1.08f;
+    if (maxW < 1.0f) maxW = 1.0f;
 
-        float wpmTick = t * MAX_WPM;
-        char tickBuf[8];
-        std::snprintf(tickBuf, sizeof(tickBuf), "%.0f", wpmTick);
-        float labelR = outerR + 22;
-        Vector2 tsz  = MeasureTextEx(font, tickBuf, 12.0f, 1.0f);
-        DrawTextEx(font, tickBuf,
-                   {cx + labelR * std::cos(tickAngle) - tsz.x * 0.5f,
-                    cy + labelR * std::sin(tickAngle) - tsz.y * 0.5f},
-                   12.0f, 1.0f, {175, 170, 158, 170});
+    auto yForWpm = [&](float v) {
+        return py + ph - clamp01(v / maxW) * ph;
+    };
+
+    for (int i = 0; i <= 4; i++) {
+        float gy = py + (float)i / 4.0f * ph;
+        DrawLineEx({px + 1.0f, gy}, {px + pw - 1.0f, gy}, 1.0f, {40, 40, 60, 170});
     }
 
-    // Minor tick marks
-    for (int i = 1; i < 20; i++) {
-        if (i % 4 == 0) continue; // skip major positions
-        float t         = (float)i / 20.0f;
-        float tickAngle = (ARC_START + t * ARC_SWEEP) * DEG2RAD;
-        DrawLineEx({cx + (innerR - 3) * std::cos(tickAngle),
-                    cy + (innerR - 3) * std::sin(tickAngle)},
-                   {cx + (outerR + 3) * std::cos(tickAngle),
-                    cy + (outerR + 3) * std::sin(tickAngle)},
-                   1.5f, {140, 135, 125, 145});
-    }
-
-    // Average marker — prominent yellow tick
     if (avgWPM > 0.0f) {
-        float avgAngle = (ARC_START + avgRatio * ARC_SWEEP) * DEG2RAD;
-        DrawLineEx({cx + (innerR - 13) * std::cos(avgAngle),
-                    cy + (innerR - 13) * std::sin(avgAngle)},
-                   {cx + (outerR + 14) * std::cos(avgAngle),
-                    cy + (outerR + 14) * std::sin(avgAngle)},
-                   4.0f, {255, 220, 80, 230});
+        float ay = yForWpm(avgWPM);
+        for (float gx = px + 2.0f; gx < px + pw - 2.0f; gx += 12.0f)
+            DrawLineEx({gx, ay}, {std::min(gx + 7.0f, px + pw - 2.0f), ay}, 1.5f, {255, 220, 80, 205});
+        char abuf[32];
+        std::snprintf(abuf, sizeof(abuf), "avg %.0f", avgWPM);
+        DrawTextEx(font, abuf, {px + 4.0f, ay - 15.0f}, 11.0f, SPACING, {255, 220, 80, 200});
     }
 
-    // Fire intensity: ramps up above average WPM, recedes below
+    Vector2 lead = {px, yForWpm(tachoWPM)};
+    if (history.size() >= 2) {
+        int n = (int)history.size();
+        for (int i = 1; i < n; i++) {
+            float x0 = px + (float)(i - 1) / (float)(n - 1) * pw;
+            float x1 = px + (float)(i) / (float)(n - 1) * pw;
+            float y0 = yForWpm(history[i - 1]);
+            float y1 = yForWpm(history[i]);
+            float local = clamp01((history[i] / maxW) * 1.3f);
+            Color c0 = mixColor({75, 188, 255, 230}, {255, 136, 56, 245}, local);
+            DrawLineEx({x0, y0}, {x1, y1}, 2.3f, c0);
+            if (i == n - 1) lead = {x1, y1};
+        }
+    } else {
+        DrawLineEx({px, lead.y}, {px + pw, lead.y}, 2.0f, {110, 190, 255, 220});
+        lead.x = px + pw;
+    }
+
     float fireIntensity = 0.0f;
     if (avgWPM > 0.0f && tachoWPM > avgWPM * 0.90f) {
         float startFire = avgWPM * 0.90f;
-        float maxFire   = avgWPM + (MAX_WPM - avgWPM) * 0.65f;
-        fireIntensity = std::min((tachoWPM - startFire) / std::max(1.0f, maxFire - startFire), 1.0f);
+        float maxFire   = avgWPM + (maxW - avgWPM) * 0.70f;
+        fireIntensity = clamp01((tachoWPM - startFire) / std::max(1.0f, maxFire - startFire));
     } else if (avgWPM <= 0.0f && tachoWPM > 20.0f) {
-        fireIntensity = std::min((tachoWPM - 20.0f) / 50.0f, 0.75f);
+        fireIntensity = clamp01((tachoWPM - 20.0f) / 55.0f);
     }
 
-    // Needle
-    float needleT     = std::min(tachoWPM, MAX_WPM) / MAX_WPM;
-    float needleAngle = (ARC_START + needleT * ARC_SWEEP) * DEG2RAD;
-    float nx = cx + (outerR - 5) * std::cos(needleAngle);
-    float ny = cy + (outerR - 5) * std::sin(needleAngle);
-
-    // Triangular flame tongues aligned along the needle direction
     if (fireIntensity > 0.01f) {
         float f1 = std::sin(time * 13.0f);
-        float f2 = std::sin(time * 21.0f + 0.7f);
-        float f3 = std::sin(time * 8.5f  + 1.9f);
-        float f4 = std::sin(time * 18.0f + 3.1f);
-        float fi = fireIntensity;
-        float bh = fi * 55.0f;
+        float f2 = std::sin(time * 20.0f + 0.7f);
+        float f3 = std::sin(time * 9.0f + 2.1f);
+        float fh = 26.0f + fireIntensity * 36.0f;
+        float fw = 8.0f + fireIntensity * 10.0f;
 
-        // Needle direction vectors
-        float fwd_x  =  std::sin(needleAngle);   // 90° left of needle
-        float fwd_y  = -std::cos(needleAngle);
-        float perp_x =  std::cos(needleAngle);   // perpendicular to fire direction
-        float perp_y =  std::sin(needleAngle);
-
-        // tongue: flames extend in needle direction from tip
-        //   po = perp offset of base, bw = base half-width, h = length along needle,
-        //   lean = tip perp-lean (flutter), col = color
-        auto tongue = [&](float po, float bw, float h, float lean, Color col) {
+        auto tongue = [&](float ox, float tipWiggle, float hMul, Color col) {
             DrawTriangle(
-                {nx + fwd_x*h  + perp_x*(po+lean), ny + fwd_y*h  + perp_y*(po+lean)}, // tip
-                {nx - fwd_x*3  + perp_x*(po-bw),   ny - fwd_y*3  + perp_y*(po-bw)  }, // base L
-                {nx - fwd_x*3  + perp_x*(po+bw),   ny - fwd_y*3  + perp_y*(po+bw)  }, // base R
-                col);
+                {lead.x + ox + tipWiggle, lead.y - fh * hMul},
+                {lead.x + ox - fw * 0.5f, lead.y + 2.0f},
+                {lead.x + ox + fw * 0.5f, lead.y + 2.0f}, col);
         };
 
-        // Outer dark-red wisps: long, lean wide
-        tongue(-9.0f + f1*3.0f,  11.0f, bh*0.62f, -9.0f + f2*10.0f, {150, 18,  3, (unsigned char)(105.0f*fi)});
-        tongue( 9.0f + f2*3.0f,  11.0f, bh*0.58f,  9.0f + f1*10.0f, {150, 18,  3, (unsigned char)(105.0f*fi)});
-
-        // Mid orange
-        tongue(-5.0f + f3*3.0f,   8.0f, bh*0.82f, -5.0f + f4*7.0f,  {235, 75,  8, (unsigned char)(155.0f*fi)});
-        tongue( 5.0f + f4*3.0f,   8.0f, bh*0.78f,  5.0f + f3*7.0f,  {235, 75,  8, (unsigned char)(155.0f*fi)});
-
-        // Central tall tongue: yellow-orange
-        tongue(f1*2.0f,            7.0f, bh*1.00f,  f2*5.0f,         {255, 148, 16, (unsigned char)(188.0f*fi)});
-
-        // Inner yellow
-        tongue(-3.0f + f3*1.5f,   5.0f, bh*0.60f, -2.0f + f4*3.0f,  {255, 218, 50, (unsigned char)(212.0f*fi)});
-        tongue( 3.0f + f4*1.5f,   5.0f, bh*0.55f,  2.0f + f3*3.0f,  {255, 218, 50, (unsigned char)(212.0f*fi)});
-
-        // White-yellow core
-        tongue(f1*0.8f,            4.0f, bh*0.35f,  f2*1.5f,         {255, 252, 150, (unsigned char)(238.0f*fi)});
-
-        // Ball at the needle tip — prominent glowing orb
-        DrawCircle((int)nx, (int)ny, (int)(12.0f * fi), {255, 230, 130, (unsigned char)(180.0f*fi)});
-        DrawCircle((int)nx, (int)ny, (int)( 7.0f * fi), {255, 255, 210, (unsigned char)(230.0f*fi)});
+        tongue(-6.0f + f1 * 2.0f, f2 * 5.0f, 0.78f, {200, 40, 10, (unsigned char)(130 * fireIntensity)});
+        tongue( 6.0f + f2 * 2.0f, f1 * 5.0f, 0.74f, {200, 40, 10, (unsigned char)(130 * fireIntensity)});
+        tongue(-2.0f + f3 * 1.8f, f1 * 3.0f, 0.92f, {255, 126, 20, (unsigned char)(180 * fireIntensity)});
+        tongue( 2.0f + f1 * 1.8f, f2 * 3.0f, 0.88f, {255, 126, 20, (unsigned char)(180 * fireIntensity)});
+        tongue(f2 * 1.3f, f3 * 2.2f, 1.0f, {255, 220, 80, (unsigned char)(215 * fireIntensity)});
+        DrawCircle((int)lead.x, (int)lead.y, (int)(10.0f * fireIntensity), {255, 230, 130, (unsigned char)(180 * fireIntensity)});
     }
 
-    // Needle shadow then needle
-    DrawLineEx({cx + 2, cy + 2}, {nx + 2, ny + 2}, 3.5f, {0, 0, 0, 65});
-    Color needleCol;
-    if (fireIntensity > 0.0f) {
-        // Color shifts fast: white → orange-red
-        float f = std::min(fireIntensity * 1.8f, 1.0f);
-        needleCol = {255,
-                     (unsigned char)(255 - f * 210),
-                     (unsigned char)(255 - f * 255),
-                     255};
-    } else {
-        needleCol = WHITE;
-    }
-    DrawLineEx({cx, cy}, {nx, ny}, 3.5f, needleCol);
+    DrawCircle((int)lead.x, (int)lead.y, 5, {255, 242, 205, 255});
+    DrawCircleLines((int)lead.x, (int)lead.y, 8, {255, 188, 110, 200});
 
-    // Pivot
-    DrawCircle((int)cx, (int)cy, 9, {45, 45, 58, 255});
-    DrawCircle((int)cx, (int)cy, 6, {220, 55, 40, 255});
+    DrawTextEx(font, "WPM Live", {x + 10.0f, y + 6.0f}, 14.0f, SPACING, {170, 170, 196, 210});
+    char wpmBuf[20];
+    std::snprintf(wpmBuf, sizeof(wpmBuf), "%.0f wpm", tachoWPM);
+    Vector2 wsz = MeasureTextEx(font, wpmBuf, 19.0f, SPACING);
+    DrawTextEx(font, wpmBuf, {x + w - wsz.x - 10.0f, y + 4.0f}, 19.0f, SPACING, WHITE);
 
-    // WPM readout inside
-    char wpmBuf[16];
-    std::snprintf(wpmBuf, sizeof(wpmBuf), "%.0f", tachoWPM);
-    Vector2 wsz = MeasureTextEx(font, wpmBuf, 24.0f, SPACING);
-    DrawTextEx(font, wpmBuf, {cx - wsz.x * 0.5f, cy + innerR * 0.28f}, 24.0f, SPACING, WHITE);
-    Vector2 lsz = MeasureTextEx(font, "WPM", 13.0f, SPACING);
-    DrawTextEx(font, "WPM", {cx - lsz.x * 0.5f, cy + innerR * 0.28f + 28.0f},
-               13.0f, SPACING, DIM_COLOR);
+    char capBuf[16];
+    std::snprintf(capBuf, sizeof(capBuf), "%.0f", maxW);
+    DrawTextEx(font, capBuf, {px + 2.0f, py - 14.0f}, 11.0f, SPACING, {115, 122, 150, 180});
 }
 
 void RenderState::drawCashout(const GameState& game, float dt) {
@@ -1279,6 +1240,17 @@ void RenderState::drawCashout(const GameState& game, float dt) {
     const Color PAPER  = {240, 235, 218, 255};
     const Color INK    = {12,  12,  12,  255};
     const Color INKDIM = {80,  75,  68,  255};
+    Color comboTint = comboColorForStreak(bestComboStreakWords);
+    comboTint.a = 225;
+    Color paceTint = mixColor({90, 145, 255, 210}, {255, 122, 58, 225}, avgPressure);
+    float rewardPulse = (std::sin(cursorBlink * 4.2f) + 1.0f) * 0.5f;
+
+    DrawRectangleGradientV(canX, canY, canW, 150,
+                           {comboTint.r, comboTint.g, comboTint.b, 36},
+                           {comboTint.r, comboTint.g, comboTint.b, 0});
+    DrawRectangleGradientV(canX, canY + canH - 160, canW, 160,
+                           {paceTint.r, paceTint.g, paceTint.b, 0},
+                           {paceTint.r, paceTint.g, paceTint.b, 28});
 
     // =========================================================
     // LEFT PANEL — Nutrition Facts label
@@ -1286,6 +1258,14 @@ void RenderState::drawCashout(const GameState& game, float dt) {
     const float PX = 52.0f, PY = 60.0f, PW = 415.0f, PH = 560.0f;
     DrawRectangleRec({PX, PY, PW, PH}, PAPER);
     DrawRectangleLinesEx({PX, PY, PW, PH}, 3.5f, INK);
+    DrawRectangleLinesEx({PX - 2.0f, PY - 2.0f, PW + 4.0f, PH + 4.0f}, 2.0f,
+                         {comboTint.r, comboTint.g, comboTint.b, (unsigned char)(110 + rewardPulse * 90.0f)});
+    DrawRectangleGradientV((int)PX + 2, (int)PY + 2, 10, (int)PH - 4,
+                           {comboTint.r, comboTint.g, comboTint.b, 168},
+                           {paceTint.r, paceTint.g, paceTint.b, 168});
+    DrawRectangleGradientH((int)PX + 12, (int)PY + 4, (int)PW - 16, 8,
+                           {comboTint.r, comboTint.g, comboTint.b, 145},
+                           {paceTint.r, paceTint.g, paceTint.b, 145});
 
     // Label edges slightly darker — sells the wrap-around-cylinder illusion
     DrawRectangleGradientH((int)PX, (int)PY, 22, (int)PH, {0, 0, 0, 60}, {0, 0, 0, 0});
@@ -1357,8 +1337,19 @@ void RenderState::drawCashout(const GameState& game, float dt) {
     std::snprintf(buf, sizeof(buf), "%d chars", game.typing.maxStreak);
     statRow("Best Streak", buf, false, T4);
 
-    std::snprintf(buf, sizeof(buf), "%d words", bestComboStreakWords);
-    statRow("Best Word Combo", buf, false, T5);
+    float comboRowY = ry2;
+    if (chartProgress >= T5) {
+        inkFlash(T5, comboRowY, 32.0f);
+        DrawRectangle((int)PX, (int)comboRowY, (int)PW, 1, {140, 135, 125, 200});
+        DrawRectangleGradientH((int)PX + 1, (int)comboRowY + 1, (int)PW - 2, 30,
+                               {comboTint.r, comboTint.g, comboTint.b, 42},
+                               {paceTint.r, paceTint.g, paceTint.b, 26});
+        DrawTextEx(font, "Best Word Combo", {rx + 12, comboRowY + 4}, 15.0f, SPACING, {45, 36, 40, 255});
+        std::snprintf(buf, sizeof(buf), "%d words", bestComboStreakWords);
+        Vector2 vsz = MeasureTextEx(font, buf, 17.0f, SPACING);
+        DrawTextEx(font, buf, {PX + PW - vsz.x - 12, comboRowY + 4}, 17.0f, SPACING, comboTint);
+    }
+    ry2 += 32;
 
     int errors = game.typing.totalKeystrokes - game.typing.correctKeystrokes;
     std::snprintf(buf, sizeof(buf), "%d", errors);
@@ -1387,15 +1378,34 @@ void RenderState::drawCashout(const GameState& game, float dt) {
         ry2 += 28;
     }
 
+    if (chartProgress >= T9) {
+        const char* rank =
+            (bestComboStreakWords >= 18) ? "Broth Legend" :
+            (bestComboStreakWords >= 10) ? "Stock Burner" :
+            (bestComboStreakWords >= 5)  ? "Soup Sprinter" : "Warm Ladle";
+        Vector2 rsz = MeasureTextEx(font, rank, 14.0f, SPACING);
+        DrawTextEx(font, rank, {PX + PW - rsz.x - 12.0f, ry2 + 4.0f}, 14.0f, SPACING, comboTint);
+        DrawTextEx(font, "Combo Rank", {rx + 12.0f, ry2 + 4.0f}, 14.0f, SPACING, {65, 58, 58, 240});
+    }
+    ry2 += 24.0f;
+
     // Section 9: thick rule + total cash
     if (chartProgress >= T10) {
         inkFlash(T10, ry2, 40.0f);
+        DrawRectangleGradientH((int)PX + 2, (int)ry2 + 2, (int)PW - 4, 34,
+                               {comboTint.r, comboTint.g, comboTint.b, (unsigned char)(46 + rewardPulse * 36.0f)},
+                               {paceTint.r, paceTint.g, paceTint.b, (unsigned char)(46 + rewardPulse * 36.0f)});
         DrawRectangle((int)PX, (int)ry2, (int)PW, 6, INK);
         DrawTextEx(font, "Total Cash", {rx, ry2 + 9}, 20.0f, SPACING, INK);
         std::snprintf(buf, sizeof(buf), "$%d", displayTotal);
-        Color cashColor = (chartProgress >= 1.0f) ? (Color){40, 140, 55, 255} : (Color){60, 160, 70, 255};
+        Color cashColor = (chartProgress >= 1.0f)
+            ? mixColor(comboTint, paceTint, 0.45f)
+            : mixColor(comboTint, {60, 160, 70, 255}, 0.35f);
+        cashColor.a = 255;
         Vector2 csz = MeasureTextEx(font, buf, 26.0f, SPACING);
         DrawTextEx(font, buf, {PX + PW - csz.x - 12, ry2 + 6}, 26.0f, SPACING, cashColor);
+        DrawRectangleLinesEx({PX + 1.0f, ry2 + 1.0f, PW - 2.0f, 37.0f}, 1.3f,
+                             {cashColor.r, cashColor.g, cashColor.b, (unsigned char)(140 + rewardPulse * 80.0f)});
     }
 
     // =========================================================
@@ -1404,6 +1414,11 @@ void RenderState::drawCashout(const GameState& game, float dt) {
     const float RX = 492.0f, RW = (float)(SCREEN_W - 492 - 52), RH = PH;
     DrawRectangleRec({RX, PY, RW, RH}, {20, 20, 30, 215});
     DrawRectangleLinesEx({RX, PY, RW, RH}, 1.5f, {55, 55, 75, 180});
+    DrawRectangleLinesEx({RX - 1.5f, PY - 1.5f, RW + 3.0f, RH + 3.0f}, 1.3f,
+                         {comboTint.r, comboTint.g, comboTint.b, (unsigned char)(90 + rewardPulse * 70.0f)});
+    DrawRectangleGradientV((int)RX + 2, (int)PY + 2, (int)RW - 4, 38,
+                           {comboTint.r, comboTint.g, comboTint.b, 52},
+                           {paceTint.r, paceTint.g, paceTint.b, 0});
 
     const auto& samples = game.typing.wpmSamples;
     if (samples.size() >= 2) {
@@ -1472,6 +1487,8 @@ void RenderState::drawCashout(const GameState& game, float dt) {
         Color earnCol = (earnedSoFar == 0)        ? (Color){70, 70, 85, 160}  :
                         (earnedSoFar == last.cash) ? (Color){80, 220, 100, 255} :
                                                      (Color){255, 220, 80,  255};
+        DrawRectangleRounded({RX + 64.0f, cashLabelY + 18.0f, RW - 128.0f, 52.0f}, 0.3f, 8,
+                             {comboTint.r, comboTint.g, comboTint.b, (unsigned char)(22 + rewardPulse * 24.0f)});
         // Scale pop when cash changes
         float earnSz = (chartProgress < 1.0f && earnedSoFar > 0) ? 42.0f : 38.0f;
         Vector2 eSz  = MeasureTextEx(font, buf, earnSz, SPACING);
@@ -1480,13 +1497,18 @@ void RenderState::drawCashout(const GameState& game, float dt) {
 
         float bonusY = cashLabelY + 82.0f;
         std::snprintf(buf, sizeof(buf), "+$%d combo bonus", comboBonusCash);
-        Color comboCol = comboColorForStreak(bestComboStreakWords);
-        comboCol.a = 215;
+        Color comboCol = comboTint;
+        comboCol.a = 230;
+        DrawRectangleRounded({RX + 78.0f, bonusY - 3.0f, RW - 156.0f, 20.0f}, 0.4f, 8,
+                             {comboTint.r, comboTint.g, comboTint.b, 30});
         Vector2 cbSz = MeasureTextEx(font, buf, 14.0f, SPACING);
         DrawTextEx(font, buf, {RX + (RW - cbSz.x)*0.5f, bonusY}, 14.0f, SPACING, comboCol);
 
         std::snprintf(buf, sizeof(buf), "+$%d pace bonus", pressureBonusCash);
-        Color paceCol = mixColor({90, 145, 255, 210}, {255, 122, 58, 225}, avgPressure);
+        Color paceCol = paceTint;
+        paceCol.a = 230;
+        DrawRectangleRounded({RX + 78.0f, bonusY + 21.0f, RW - 156.0f, 20.0f}, 0.4f, 8,
+                             {paceTint.r, paceTint.g, paceTint.b, 30});
         Vector2 pbSz = MeasureTextEx(font, buf, 14.0f, SPACING);
         DrawTextEx(font, buf, {RX + (RW - pbSz.x)*0.5f, bonusY + 24.0f}, 14.0f, SPACING, paceCol);
 
